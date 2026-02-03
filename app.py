@@ -113,10 +113,8 @@ def kpi_card(title, value, sublabel=None, delta=None, help_text=None):
 
 
 def inject_dashboard_style():
-    if st.session_state.get("dashboard_style_injected"):
-        return
-    st.session_state["dashboard_style_injected"] = True
-
+    # Importante: o Streamlit reexecuta o script a cada interação.
+    # Se o CSS for injetado só uma vez, o layout pode "quebrar" em reruns.
     st.markdown(
         textwrap.dedent(
             """
@@ -126,6 +124,7 @@ def inject_dashboard_style():
                 grid-template-columns: repeat(4, minmax(0, 1fr));
                 gap: 16px;
                 margin-bottom: 8px;
+                width: 100%;
             }
             @media (max-width: 1200px) {
                 .kpi-grid {
@@ -320,36 +319,32 @@ def main():
     color_sequence = ["#2563eb", "#10b981", "#f97316", "#6366f1"]
     chart_template = "plotly_white"
 
-    with st.container(border=True):
-        col1, col2, col3 = st.columns(3, gap="large")
+    # Menu lateral (sidebar)
+    st.sidebar.subheader("Filtros")
+    with st.sidebar.container(border=True):
+        periodo_visualizacao = st.selectbox(
+            "Granularidade do período",
+            ["Diário", "Semanal", "Mensal", "Trimestral", "Anual"],
+            index=2,
+        )
 
-        with col1:
-            periodo_visualizacao = st.selectbox(
-                "Granularidade do período",
-                ["Diário", "Semanal", "Mensal", "Trimestral", "Anual"],
-                index=2,
-            )
+        data_inicio = df["data"].min().date()
+        data_fim = df["data"].max().date()
+        ano_padrao = int(df["ano"].max())
+        inicio_padrao = datetime(ano_padrao, 1, 1).date()
+        fim_padrao = datetime(ano_padrao, 12, 31).date()
+        intervalo = st.date_input(
+            "Período",
+            value=(inicio_padrao, fim_padrao),
+            min_value=data_inicio,
+            max_value=data_fim,
+        )
 
-        with col2:
-            data_inicio = df["data"].min().date()
-            data_fim = df["data"].max().date()
-            ano_padrao = int(df["ano"].max())
-            inicio_padrao = datetime(ano_padrao, 1, 1).date()
-            fim_padrao = datetime(ano_padrao, 12, 31).date()
-            intervalo = st.date_input(
-                "Período",
-                value=(inicio_padrao, fim_padrao),
-                min_value=data_inicio,
-                max_value=data_fim,
-            )
-
-        with col3:
-            st.write("")
-            st.toggle(
-                "Exibir valores brutos e líquidos",
-                value=True,
-                key="show_bruto_liq",
-            )
+        st.toggle(
+            "Exibir valores brutos e líquidos",
+            value=True,
+            key="show_bruto_liq",
+        )
 
     if isinstance(intervalo, tuple) and len(intervalo) == 2:
         inicio, fim = intervalo
