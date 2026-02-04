@@ -10,74 +10,161 @@ from plotly.subplots import make_subplots
 
 
 @st.cache_data
-def gerar_dados_mock(ano: int | None = None) -> pd.DataFrame:
-    """Gera dados mock de vendas (agregado diário) para ano atual + ano anterior."""
+def gerar_dados_mock(ano: int | None = None):
+    """
+    Gera dados mock em nível transacional (para Performance Comercial) e um df diário agregado
+    (para Análise Operacional), cobrindo o ano base e o ano anterior.
+
+    Retorna:
+    - df_vendas: transações
+    - df_diario: agregado diário
+    - df_metas: metas mensais por vendedor/equipe
+    """
+
     hoje = datetime.today().date()
     ano_base = ano if ano is not None else (hoje.year - 1)  # último ano completo
 
-    def gerar_ano(ano_ref: int, seed: int) -> pd.DataFrame:
+    vendedores = [
+        "Ana", "Bruno", "Carla", "Diego", "Elisa", "Felipe",
+        "Gi", "Henrique", "Isabela", "João", "Karina", "Lucas",
+    ]
+    equipes = {
+        "Ana": "Equipe A",
+        "Bruno": "Equipe A",
+        "Carla": "Equipe A",
+        "Diego": "Equipe B",
+        "Elisa": "Equipe B",
+        "Felipe": "Equipe B",
+        "Gi": "Equipe C",
+        "Henrique": "Equipe C",
+        "Isabela": "Equipe C",
+        "João": "Equipe D",
+        "Karina": "Equipe D",
+        "Lucas": "Equipe D",
+    }
+    regioes = {
+        "Equipe A": "Sudeste",
+        "Equipe B": "Sul",
+        "Equipe C": "Nordeste",
+        "Equipe D": "Centro-Oeste",
+    }
+
+    def gerar_transacoes_ano(ano_ref: int, seed: int) -> pd.DataFrame:
         datas = pd.date_range(start=f"{ano_ref}-01-01", end=f"{ano_ref}-12-31", freq="D")
         rng = np.random.default_rng(seed)
 
         n_dias = len(datas)
-        dow = datas.dayofweek.to_numpy()  # 0=Seg ... 6=Dom
+        dow = datas.dayofweek.to_numpy()
         doy = datas.dayofyear.to_numpy()
 
-        # Efeito dia da semana (fim de semana reduz)
         fator_dow = np.select([dow == 5, dow == 6], [0.78, 0.72], default=1.0)
-
-        # Sazonalidade anual suave + "picos" (ex.: maio, novembro)
-        sazonal_anual = 1.0 + 0.18 * np.sin(2 * np.pi * (doy / 365.0))
+        sazonal = 1.0 + 0.18 * np.sin(2 * np.pi * (doy / 365.0))
         pico_maio = np.exp(-0.5 * ((doy - 140) / 18) ** 2) * 0.18
         pico_nov = np.exp(-0.5 * ((doy - 325) / 22) ** 2) * 0.35
-
-        # Tendência leve (pequena diferença entre anos)
         trend = 0.95 + 0.10 * (np.arange(n_dias) / (n_dias - 1))
 
-        # Volume de transações: Poisson com lambdas ajustados
-        lam = 85 * fator_dow * sazonal_anual * (1 + pico_maio + pico_nov) * trend
+        lam = 85 * fator_dow * sazonal * (1 + pico_maio + pico_nov) * trend
         lam = np.clip(lam, 10, None)
-        qtd_transacoes = rng.poisson(lam).astype(int)
+        qtd_transacoes_dia = rng.poisson(lam).astype(int)
 
-        # Ticket: lognormal ajustado por sazonalidade
-        ticket_base = 65 * sazonal_anual * (1 + 0.15 * pico_nov) * trend
-        sigma = 0.45
+        ticket_base = 65 * sazonal * (1 + 0.15 * pico_nov) * trend
+        sigma = 0.55
         mu = np.log(np.maximum(ticket_base, 1)) - 0.5 * sigma**2
-        ticket_medio_dia = rng.lognormal(mean=mu, sigma=sigma)
 
-        bruto = (qtd_transacoes * ticket_medio_dia).round(2)
+        datas_rep = np.repeat(datas.to_numpy(), qtd_transacoes_dia)
+        if len(datas_rep) == 0:
+            return pd.DataFrame()
 
-        itens_por_transacao = rng.normal(loc=2.0, scale=0.35, size=n_dias).clip(1.2, 2.8)
-        qtd_itens = np.maximum((qtd_transacoes * itens_por_transacao).round(0), 0).astype(int)
+        # vendedor por transação (leve diferença de performance)
+        perf_vendedor = np.array(
+            [1.10, 0.95, 1.00, 0.98, 1.05, 1.02, 0.97, 1.03, 1.01, 0.99, 1.04, 0.96]
+        )
+        prob_vendedor = perf_vendedor / perf_vendedor.sum()
+        vendedor = rng.choice(vendedores, size=len(datas_rep), p=prob_vendedor)
+        equipe = np.array([equipes[v] for v in vendedor])
+        regiao = np.array([regioes[e] for e in equipe])
 
-        promo = (pico_nov > 0.10).astype(float)
-        evento = (rng.random(n_dias) < 0.04).astype(float)
-        taxa_desconto = (
-            0.06 + 0.10 * promo + 0.05 * evento + rng.normal(0, 0.01, n_dias)
-        ).clip(0.02, 0.25)
-        descontos = (bruto * taxa_desconto).round(2)
+        # cliente por transação
+        n_clientes = 2400
+        cliente_id = rng.integers(1, n_clientes + 1, size=len(datas_rep))
 
-        impostos = (bruto * 0.12).round(2)
+        # ticket por transação (dependente do dia)
+        # gera por blocos diários (mais eficiente)
+        ticket = np.empty(len(datas_rep), dtype=float)
+        idx = 0
+        for i, n in enumerate(qtd_transacoes_dia):
+            if n <= 0:
+                continue
+            ticket[idx : idx + n] = rng.lognormal(mean=mu[i], sigma=sigma, size=n)
+            idx += n
+        # variação por vendedor/região
+        fator_regiao = np.where(regiao == "Sudeste", 1.05, 1.0)
+        fator_regiao = np.where(regiao == "Nordeste", 0.95, fator_regiao)
+        ticket = ticket * fator_regiao
 
-        taxa_devol = (
-            0.012
-            + 0.010 * promo
-            + 0.006 * (qtd_transacoes > np.quantile(qtd_transacoes, 0.9))
-        ).clip(0.005, 0.06)
-        devolucoes_valor = (bruto * taxa_devol).round(2)
+        # itens
+        itens_por_tx = rng.normal(loc=2.0, scale=0.4, size=len(datas_rep)).clip(1.0, 4.0)
+        qtd_itens = np.maximum(np.round(itens_por_tx), 1).astype(int)
 
-        liquido = (bruto - descontos - impostos - devolucoes_valor).round(2)
+        valor_bruto = (ticket).round(2)
+
+        # descontos (promo em nov + campanhas)
+        mes = pd.to_datetime(datas_rep).month
+        promo = (mes == 11).astype(float)
+        evento = (rng.random(len(datas_rep)) < 0.04).astype(float)
+        taxa_desconto = (0.05 + 0.10 * promo + 0.05 * evento + rng.normal(0, 0.01, len(datas_rep))).clip(0.0, 0.30)
+        desconto = (valor_bruto * taxa_desconto).round(2)
+
+        imposto = (valor_bruto * 0.12).round(2)
+
+        # devoluções/cancelamentos (em parte das transações)
+        p_devol = (0.010 + 0.010 * promo + 0.004 * (valor_bruto > np.quantile(valor_bruto, 0.9))).clip(0.005, 0.05)
+        is_devol = rng.random(len(datas_rep)) < p_devol
+        devolucao = np.where(is_devol, (valor_bruto * rng.uniform(0.3, 1.0, size=len(datas_rep))), 0.0).round(2)
+
+        valor_liquido = (valor_bruto - desconto - imposto - devolucao).round(2)
+
+        # custo (COGS) para margem bruta (varia por região/produto)
+        base_cogs = rng.normal(loc=0.62, scale=0.06, size=len(datas_rep)).clip(0.45, 0.85)
+        base_cogs = np.where(regiao == "Sudeste", base_cogs - 0.02, base_cogs)
+        base_cogs = np.where(regiao == "Nordeste", base_cogs + 0.02, base_cogs)
+        custo = (valor_liquido * base_cogs).round(2)
+        lucro_bruto = (valor_liquido - custo).round(2)
+
+        # recebimentos (PMR/DSO): prazo base por região + atrasos
+        prazo_base = np.select(
+            [regiao == "Sudeste", regiao == "Sul", regiao == "Nordeste", regiao == "Centro-Oeste"],
+            [25, 28, 35, 32],
+            default=30,
+        )
+        atraso = rng.normal(loc=3, scale=6, size=len(datas_rep)).round().astype(int)
+        atraso = np.clip(atraso, -5, 40)
+        dias_receb = np.clip(prazo_base + atraso, 0, 90).astype(int)
+
+        dt_venda = pd.to_datetime(datas_rep)
+        dt_receb = dt_venda + pd.to_timedelta(dias_receb, unit="D")
+
+        # algumas faturas em aberto (sem recebimento)
+        aberto = rng.random(len(datas_rep)) < 0.06
+        dt_receb = dt_receb.where(~aberto, pd.NaT)
 
         df = pd.DataFrame(
             {
-                "data": datas,
-                "faturamento_bruto": bruto,
-                "descontos": descontos,
-                "impostos": impostos,
-                "devolucoes_valor": devolucoes_valor,
-                "faturamento_liquido": liquido,
-                "qtd_transacoes": qtd_transacoes,
+                "id_venda": np.arange(1, len(datas_rep) + 1),
+                "data": dt_venda,
+                "cliente_id": cliente_id,
+                "vendedor": vendedor,
+                "equipe": equipe,
+                "regiao": regiao,
                 "qtd_itens": qtd_itens,
+                "valor_bruto": valor_bruto,
+                "desconto": desconto,
+                "imposto": imposto,
+                "devolucao": devolucao,
+                "valor_liquido": valor_liquido,
+                "custo": custo,
+                "lucro_bruto": lucro_bruto,
+                "data_recebimento": dt_receb,
             }
         )
         df["ano"] = df["data"].dt.year
@@ -86,14 +173,81 @@ def gerar_dados_mock(ano: int | None = None) -> pd.DataFrame:
         df["trimestre"] = df["data"].dt.to_period("Q").dt.start_time
         return df
 
-    # ano anterior + ano base (último ano completo)
-    df_prev = gerar_ano(ano_base - 1, seed=41)
-    df_curr = gerar_ano(ano_base, seed=42)
-    return pd.concat([df_prev, df_curr], ignore_index=True)
+    df_prev = gerar_transacoes_ano(ano_base - 1, seed=41)
+    df_curr = gerar_transacoes_ano(ano_base, seed=42)
+    df_vendas = pd.concat([df_prev, df_curr], ignore_index=True)
+
+    # agregado diário (mantém o dashboard operacional atual)
+    # OBS: precisamos nomear a coluna do groupby explicitamente para evitar KeyError ('data')
+    if df_vendas.empty:
+        df_diario = pd.DataFrame(
+            columns=[
+                "data",
+                "faturamento_bruto",
+                "descontos",
+                "impostos",
+                "devolucoes_valor",
+                "faturamento_liquido",
+                "qtd_transacoes",
+                "qtd_itens",
+                "ano",
+                "mes",
+                "semana",
+                "trimestre",
+            ]
+        )
+    else:
+        df_diario = (
+            df_vendas.assign(data_dia=df_vendas["data"].dt.floor("D"))
+            .groupby("data_dia", as_index=False)
+            .agg(
+                faturamento_bruto=("valor_bruto", "sum"),
+                descontos=("desconto", "sum"),
+                impostos=("imposto", "sum"),
+                devolucoes_valor=("devolucao", "sum"),
+                faturamento_liquido=("valor_liquido", "sum"),
+                qtd_transacoes=("id_venda", "count"),
+                qtd_itens=("qtd_itens", "sum"),
+            )
+            .rename(columns={"data_dia": "data"})
+        )
+        df_diario["data"] = pd.to_datetime(df_diario["data"])
+    df_diario["ano"] = df_diario["data"].dt.year
+    df_diario["mes"] = df_diario["data"].dt.to_period("M").dt.to_timestamp()
+    df_diario["semana"] = df_diario["data"].dt.to_period("W").dt.start_time
+    df_diario["trimestre"] = df_diario["data"].dt.to_period("Q").dt.start_time
+
+    # metas mensais (mock) por vendedor: baseado em histórico (ano anterior) + crescimento
+    hist = (
+        df_vendas[df_vendas["ano"] == ano_base - 1]
+        .assign(mes_num=lambda d: d["data"].dt.month)
+        .groupby(["vendedor", "equipe", "mes_num"], as_index=False)
+        .agg(faturamento_liquido=("valor_liquido", "sum"))
+    )
+
+    rng_meta = np.random.default_rng(123)
+    hist["meta"] = (hist["faturamento_liquido"] * rng_meta.normal(1.08, 0.06, size=len(hist))).clip(0).round(2)
+    df_metas = hist[["vendedor", "equipe", "mes_num", "meta"]].copy()
+    df_metas["ano"] = ano_base
+    df_metas = df_metas.rename(columns={"meta": "meta_faturamento_liquido"})
+
+    return df_vendas, df_diario, df_metas
 
 
 def format_currency(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_currency_compact(v: float) -> str:
+    v = float(v or 0)
+    abs_v = abs(v)
+    if abs_v >= 1_000_000_000:
+        return f"R$ {v/1_000_000_000:.2f} bi".replace(".", ",")
+    if abs_v >= 1_000_000:
+        return f"R$ {v/1_000_000:.2f} mi".replace(".", ",")
+    if abs_v >= 1_000:
+        return f"R$ {v/1_000:.2f} mil".replace(".", ",")
+    return format_currency(v)
 
 
 def format_percent(v):
@@ -112,40 +266,52 @@ def kpi_card(title, value, sublabel=None, delta=None, help_text=None):
             st.caption(help_text)
 
 def inject_typography():
+    # Carrega Nunito via Google Fonts (mais confiável que @import em alguns ambientes)
+    st.markdown(
+        textwrap.dedent(
+            """
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet">
+            """
+        ),
+        unsafe_allow_html=True,
+    )
+
     st.markdown(
         textwrap.dedent(
             """
             <style>
-            @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap');
-
             /* Fonte padrão para o app (exclui ícones do Streamlit) */
-            html, body, [data-testid="stAppViewContainer"] {{
-              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            }}
-            [data-testid="stAppViewContainer"] *:not(.material-icons):not([class*="material-symbols"]) {{
-              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            }}
+            html, body, [data-testid="stAppViewContainer"] {
+              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif !important;
+            }
+            [data-testid="stAppViewContainer"] *:not(.material-icons):not([class*="material-symbols"]):not([data-testid="stIconMaterial"]):not([data-testid="stIconMaterial"] *) {
+              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif !important;
+            }
 
-            /* Mantém Material Icons/Symbols funcionando (evita virar texto tipo 'keyboard_double_arrow_right') */
+            /* Mantém Material Icons/Symbols funcionando */
             .material-icons,
-            [class*="material-icons"] {{
+            [class*="material-icons"] {
               font-family: 'Material Icons' !important;
               font-feature-settings: 'liga' 1;
               -webkit-font-feature-settings: 'liga' 1;
-            }}
-            [class*="material-symbols"] {{
+            }
+            [class*="material-symbols"] {
               font-family: 'Material Symbols Rounded' !important;
               font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
               font-feature-settings: 'liga' 1;
               -webkit-font-feature-settings: 'liga' 1;
-            }}
+            }
 
-            /* Streamlit v1.4x+ usa stIconMaterial com ligatures (texto -> ícone) */
-            [data-testid="stIconMaterial"] {{
+            /* Streamlit usa stIconMaterial com ligatures (texto -> ícone) */
+            [data-testid="stIconMaterial"],
+            [data-testid="stIconMaterial"] * {
               font-family: 'Material Symbols Rounded' !important;
               font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
               font-feature-settings: 'liga' 1;
               -webkit-font-feature-settings: 'liga' 1;
+              font-variant-ligatures: contextual common-ligatures;
               text-transform: none;
               letter-spacing: normal;
               white-space: nowrap;
@@ -153,7 +319,7 @@ def inject_typography():
               direction: ltr;
               display: inline-block;
               line-height: 1;
-            }}
+            }
             </style>
             """
         ),
@@ -243,6 +409,9 @@ def inject_dashboard_style():
                 font-size: 0.78rem;
                 color: #94a3b8;
                 margin-top: 4px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
             .kpi-delta-pos {
                 font-size: 0.8rem;
@@ -258,6 +427,8 @@ def inject_dashboard_style():
                 font-size: 0.72rem;
                 color: #94a3b8;
                 margin-top: 6px;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
             </style>
             """
@@ -283,8 +454,16 @@ def render_kpi_grid(kpis):
             css_class = "kpi-delta-pos" if delta >= 0 else "kpi-delta-neg"
             delta_html = f'<div class="{css_class}">{format_percent(delta)}</div>'
 
-        sub_html = f'<div class="kpi-sub">{sublabel}</div>' if sublabel else ""
-        help_html = f'<div class="kpi-help">{help_text}</div>' if help_text else ""
+        sub_html = (
+            f'<div class="kpi-sub" title="{sublabel}">{sublabel}</div>'
+            if sublabel
+            else ""
+        )
+        help_html = (
+            f'<div class="kpi-help" title="{help_text}">{help_text}</div>'
+            if help_text
+            else ""
+        )
 
         card_html = (
             f'<div class="kpi-card" style="--kpi-accent:{accent}">'
@@ -353,25 +532,433 @@ def calcular_periodos(df: pd.DataFrame, periodo: str):
     return agg
 
 
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    w = weights.fillna(0).astype(float)
+    v = values.fillna(0).astype(float)
+    denom = w.sum()
+    return float((v * w).sum() / denom) if denom > 0 else 0.0
+
+
+def render_performance_comercial(
+    df_vendas_periodo: pd.DataFrame,
+    df_vendas_full: pd.DataFrame,
+    df_metas: pd.DataFrame,
+    inicio: datetime.date,
+    fim: datetime.date,
+    plotly_font: dict,
+    chart_template: str,
+):
+    # Controles específicos
+    st.sidebar.subheader("Performance Comercial")
+    with st.sidebar.container(border=True):
+        inatividade_dias = st.slider(
+            "Inatividade para reativação (dias)",
+            min_value=15,
+            max_value=180,
+            value=60,
+            step=5,
+        )
+        top_n = st.slider("Top N", min_value=5, max_value=20, value=10, step=1)
+
+    fatur_liq = float(df_vendas_periodo["valor_liquido"].sum())
+    fatur_bruto = float(df_vendas_periodo["valor_bruto"].sum())
+    margem_total = float(df_vendas_periodo["lucro_bruto"].sum())
+    margem_pct = (margem_total / fatur_liq * 100) if fatur_liq > 0 else 0.0
+    margem_por_tx = float(df_vendas_periodo["lucro_bruto"].mean()) if len(df_vendas_periodo) else 0.0
+
+    # Clientes
+    first_purchase = df_vendas_full.groupby("cliente_id")["data"].min()
+    new_ids = first_purchase[(first_purchase.dt.date >= inicio) & (first_purchase.dt.date <= fim)].index
+    novos_clientes = int(len(new_ids))
+    vol_novos = float(df_vendas_periodo[df_vendas_periodo["cliente_id"].isin(new_ids)]["valor_liquido"].sum())
+
+    ativos_ids = df_vendas_periodo["cliente_id"].unique()
+    clientes_ativos = int(len(ativos_ids))
+    returning_mask = df_vendas_periodo["cliente_id"].map(lambda cid: first_purchase.loc[cid].date() < inicio)
+    vol_ativos_base = float(df_vendas_periodo[returning_mask]["valor_liquido"].sum()) if len(df_vendas_periodo) else 0.0
+
+    # Reativados: compra no período após inatividade > X dias
+    df_before = df_vendas_full[df_vendas_full["data"].dt.date < inicio]
+    last_before = df_before.groupby("cliente_id")["data"].max()
+    last_before_dt = last_before.reindex(ativos_ids)
+    dias_desde_ultima = (pd.Timestamp(inicio) - last_before_dt).dt.days
+    reativados_ids = pd.Index(ativos_ids)[(dias_desde_ultima > inatividade_dias).fillna(False)]
+    reativados = int(len(reativados_ids))
+
+    # Inativos no início (base para taxa de reativação)
+    clientes_com_hist = last_before.index
+    inativos_no_inicio = clientes_com_hist[(pd.Timestamp(inicio) - last_before).dt.days > inatividade_dias]
+    taxa_reativacao = (reativados / len(inativos_no_inicio) * 100) if len(inativos_no_inicio) > 0 else 0.0
+
+    # Frequência média de compra (transações por cliente ativo)
+    freq_media = (len(df_vendas_periodo) / clientes_ativos) if clientes_ativos > 0 else 0.0
+
+    # Churn: clientes ativos no período anterior (mesma duração) que não compraram no atual
+    dur = (pd.Timestamp(fim) - pd.Timestamp(inicio)).days + 1
+    prev_inicio = (pd.Timestamp(inicio) - pd.Timedelta(days=dur)).date()
+    prev_fim = (pd.Timestamp(inicio) - pd.Timedelta(days=1)).date()
+    df_prev = df_vendas_full[
+        (df_vendas_full["data"].dt.date >= prev_inicio)
+        & (df_vendas_full["data"].dt.date <= prev_fim)
+    ]
+    prev_ativos = set(df_prev["cliente_id"].unique())
+    curr_ativos = set(ativos_ids)
+    churn_qtd = len(prev_ativos - curr_ativos) if prev_ativos else 0
+    churn_rate = (churn_qtd / len(prev_ativos) * 100) if prev_ativos else 0.0
+
+    # Projeção simples: run-rate do período selecionado para os próximos 30 dias
+    daily = (
+        df_vendas_periodo.assign(data_dia=df_vendas_periodo["data"].dt.floor("D"))
+        .groupby("data_dia", as_index=False)
+        .agg(faturamento_liquido=("valor_liquido", "sum"))
+        .rename(columns={"data_dia": "data"})
+    )
+    daily["data"] = pd.to_datetime(daily["data"])
+    daily = daily.sort_values("data")
+    horizonte = 30
+    if len(daily) >= 7:
+        dias_obs = max((daily["data"].dt.date.max() - daily["data"].dt.date.min()).days + 1, 1)
+        run_rate = daily["faturamento_liquido"].sum() / dias_obs
+    else:
+        run_rate = 0.0
+    proj_30d = run_rate * horizonte
+
+    # PMR/DSO (dias): usa recebimento ou "hoje" para abertos
+    ref_today = pd.Timestamp(df_vendas_full["data"].max().date())
+    receb = df_vendas_periodo["data_recebimento"].fillna(ref_today)
+    dso_dias = (receb - df_vendas_periodo["data"]).dt.days.clip(lower=0)
+    dso_medio = float(dso_dias.mean()) if len(dso_dias) else 0.0
+
+    # Metas (somente para o ano base das metas)
+    ano_meta = int(df_metas["ano"].max()) if len(df_metas) else None
+    df_meta_periodo = df_metas.copy()
+    meses_periodo = sorted(df_vendas_periodo["data"].dt.month.unique().tolist())
+    if len(df_vendas_periodo) and ano_meta is not None:
+        ano_sel = int(df_vendas_periodo["ano"].max())
+    else:
+        ano_sel = None
+
+    atingimento_geral = None
+    if ano_sel == ano_meta and len(meses_periodo):
+        meta_total = float(df_meta_periodo[df_meta_periodo["mes_num"].isin(meses_periodo)]["meta_faturamento_liquido"].sum())
+        atingimento_geral = (fatur_liq / meta_total * 100) if meta_total > 0 else None
+
+    st.subheader("Visão geral")
+    kpis = [
+        {
+            "title": "Faturamento Líquido",
+            "value": format_currency(fatur_liq),
+            "sublabel": "Receita no período",
+            "icon": "💼",
+            "accent": "#2563eb",
+        },
+        {
+            "title": "Margem Bruta Total",
+            "value": format_currency(margem_total),
+            "sublabel": f"Margem: {margem_pct:.1f}%",
+            "icon": "🧮",
+            "accent": "#10b981",
+        },
+        {
+            "title": "Margem Bruta por Transação",
+            "value": format_currency(margem_por_tx),
+            "sublabel": "Média por venda",
+            "icon": "🧾",
+            "accent": "#f97316",
+        },
+        {
+            "title": "Faturamento vs Meta (Geral)",
+            "value": f"{atingimento_geral:.1f}%" if atingimento_geral is not None else "—",
+            "sublabel": "Atingimento no período",
+            "icon": "🎯",
+            "accent": "#6366f1",
+        },
+        {
+            "title": "Novos Clientes",
+            "value": f"{novos_clientes:,}".replace(",", "."),
+            "sublabel": f"Vendas novos: {format_currency_compact(vol_novos)}",
+            "icon": "🆕",
+            "accent": "#0ea5e9",
+        },
+        {
+            "title": "Clientes Ativos",
+            "value": f"{clientes_ativos:,}".replace(",", "."),
+            "sublabel": f"Base existente: {format_currency_compact(vol_ativos_base)}",
+            "icon": "👥",
+            "accent": "#8b5cf6",
+        },
+        {
+            "title": "Churn (Perda de Clientes)",
+            "value": f"{churn_rate:.1f}%",
+            "sublabel": f"{churn_qtd} perdidos vs período anterior",
+            "icon": "📉",
+            "accent": "#ef4444",
+        },
+        {
+            "title": "Reativação",
+            "value": f"{reativados:,}".replace(",", "."),
+            "sublabel": f"Taxa: {taxa_reativacao:.1f}%",
+            "icon": "🔄",
+            "accent": "#22c55e",
+        },
+    ]
+    render_kpi_grid(kpis)
+
+    st.divider()
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Receita & Meta", "Margem", "Clientes", "Projeção & PMR/DSO"]
+    )
+
+    with tab1:
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            st.markdown("**Faturamento por Vendedor/Equipe/Região**")
+            dim = st.selectbox("Dimensão", ["vendedor", "equipe", "regiao"], index=0)
+            df_dim = (
+                df_vendas_periodo.groupby(dim, as_index=False)
+                .agg(faturamento_liquido=("valor_liquido", "sum"))
+                .sort_values("faturamento_liquido", ascending=False)
+                .head(top_n)
+            )
+            fig = px.bar(
+                df_dim,
+                x=dim,
+                y="faturamento_liquido",
+                template=chart_template,
+                color_discrete_sequence=["#2563eb"],
+            )
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col_b:
+            st.markdown("**Faturamento vs. Meta**")
+            nivel = st.selectbox("Nível", ["Vendedor", "Equipe", "Geral"], index=0)
+            if ano_sel != ano_meta:
+                st.info("Metas mock disponíveis apenas para o último ano completo. Ajuste o período para esse ano.")
+            else:
+                atual_v = (
+                    df_vendas_periodo.assign(mes_num=lambda d: d["data"].dt.month)
+                    .groupby(["vendedor", "equipe", "mes_num"], as_index=False)
+                    .agg(faturamento_liquido=("valor_liquido", "sum"))
+                )
+                meta_v = df_meta_periodo[df_meta_periodo["mes_num"].isin(meses_periodo)]
+                df_vm = atual_v.merge(meta_v, on=["vendedor", "equipe", "mes_num"], how="left")
+                if nivel == "Vendedor":
+                    grp_cols = ["vendedor"]
+                    label_col = "vendedor"
+                elif nivel == "Equipe":
+                    grp_cols = ["equipe"]
+                    label_col = "equipe"
+                else:
+                    grp_cols = []
+                    label_col = "label"
+
+                if grp_cols:
+                    df_vm = (
+                        df_vm.groupby(grp_cols, as_index=False)
+                        .agg(
+                            faturamento_liquido=("faturamento_liquido", "sum"),
+                            meta_faturamento_liquido=("meta_faturamento_liquido", "sum"),
+                        )
+                    )
+                    df_vm["atingimento"] = np.where(
+                        df_vm["meta_faturamento_liquido"] > 0,
+                        df_vm["faturamento_liquido"] / df_vm["meta_faturamento_liquido"] * 100,
+                        np.nan,
+                    )
+                    df_vm = df_vm.sort_values("atingimento", ascending=False).head(top_n)
+                    x_vals = df_vm[label_col]
+                    y_real = df_vm["faturamento_liquido"]
+                    y_meta = df_vm["meta_faturamento_liquido"]
+                else:
+                    real_total = float(df_vm["faturamento_liquido"].sum())
+                    meta_total = float(df_vm["meta_faturamento_liquido"].sum())
+                    x_vals = ["Geral"]
+                    y_real = [real_total]
+                    y_meta = [meta_total]
+
+                figm = go.Figure()
+                figm.add_trace(
+                    go.Bar(
+                        x=x_vals,
+                        y=y_real,
+                        name="Realizado",
+                        marker_color="#2563eb",
+                    )
+                )
+                figm.add_trace(
+                    go.Bar(
+                        x=x_vals,
+                        y=y_meta,
+                        name="Meta",
+                        marker_color="#94a3b8",
+                        opacity=0.65,
+                    )
+                )
+                figm.update_layout(
+                    template=chart_template,
+                    height=360,
+                    barmode="group",
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    font=plotly_font,
+                )
+                figm.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+                st.plotly_chart(figm, width="stretch")
+
+    with tab2:
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            st.markdown("**Margem Bruta por Vendedor/Equipe/Região**")
+            dim2 = st.selectbox("Dimensão ", ["vendedor", "equipe", "regiao"], index=1)
+            df_m = (
+                df_vendas_periodo.groupby(dim2, as_index=False)
+                .agg(
+                    margem_bruta=("lucro_bruto", "sum"),
+                    faturamento_liquido=("valor_liquido", "sum"),
+                )
+            )
+            df_m["margem_pct"] = np.where(df_m["faturamento_liquido"] > 0, df_m["margem_bruta"] / df_m["faturamento_liquido"] * 100, 0)
+            df_m = df_m.sort_values("margem_bruta", ascending=False).head(top_n)
+            figm2 = px.bar(
+                df_m,
+                x=dim2,
+                y="margem_bruta",
+                template=chart_template,
+                color_discrete_sequence=["#10b981"],
+            )
+            figm2.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            figm2.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(figm2, width="stretch")
+
+        with col_b:
+            st.markdown("**Margem % (Top)**")
+            df_mp = df_m.sort_values("margem_pct", ascending=False).head(top_n)
+            figmp = px.bar(
+                df_mp,
+                x=dim2,
+                y="margem_pct",
+                template=chart_template,
+                color_discrete_sequence=["#f97316"],
+            )
+            figmp.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            figmp.update_yaxes(ticksuffix="%", rangemode="tozero")
+            st.plotly_chart(figmp, width="stretch")
+
+    with tab3:
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            st.markdown("**Novos vs Ativos (vendas)**")
+            df_pie = pd.DataFrame(
+                {
+                    "segmento": ["Novos", "Base existente"],
+                    "faturamento_liquido": [vol_novos, vol_ativos_base],
+                }
+            )
+            figp = px.pie(
+                df_pie,
+                names="segmento",
+                values="faturamento_liquido",
+                template=chart_template,
+                color="segmento",
+                color_discrete_map={"Novos": "#0ea5e9", "Base existente": "#6366f1"},
+                hole=0.55,
+            )
+            figp.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font, legend_title_text="")
+            st.plotly_chart(figp, width="stretch")
+
+        with col_b:
+            st.markdown("**Frequência média de compra**")
+            df_freq = (
+                df_vendas_periodo.assign(
+                    mes=df_vendas_periodo["data"].dt.to_period("M").dt.to_timestamp()
+                )
+                .groupby("mes", as_index=False)
+                .agg(transacoes=("id_venda", "count"), clientes=("cliente_id", "nunique"))
+            )
+            df_freq["freq_media"] = np.where(df_freq["clientes"] > 0, df_freq["transacoes"] / df_freq["clientes"], 0.0)
+            figf = px.bar(
+                df_freq,
+                x="mes",
+                y="freq_media",
+                template=chart_template,
+                color_discrete_sequence=["#8b5cf6"],
+            )
+            figf.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            figf.update_yaxes(rangemode="tozero")
+            st.plotly_chart(figf, width="stretch")
+
+    with tab4:
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            st.markdown("**Projeção de faturamento (run-rate)**")
+            df_proj = pd.DataFrame(
+                {
+                    "item": ["Faturamento (período)", f"Projeção próximos {horizonte} dias"],
+                    "valor": [fatur_liq, proj_30d],
+                }
+            )
+            figpr = px.bar(
+                df_proj,
+                x="item",
+                y="valor",
+                template=chart_template,
+                color_discrete_sequence=["#2563eb", "#10b981"],
+            )
+            figpr.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font, showlegend=False)
+            figpr.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(figpr, width="stretch")
+
+        with col_b:
+            st.markdown("**PMR/DSO por Vendedor e Região**")
+            df_dso = df_vendas_periodo.copy()
+            receb = df_dso["data_recebimento"].fillna(ref_today)
+            df_dso["dso_dias"] = (receb - df_dso["data"]).dt.days.clip(lower=0)
+            dso_vend = (
+                df_dso.groupby(["regiao", "vendedor"], as_index=False)
+                .apply(lambda g: pd.Series({"dso_medio": _weighted_mean(g["dso_dias"], g["valor_liquido"])}))
+                .reset_index(drop=True)
+            )
+            dso_vend = dso_vend.sort_values("dso_medio", ascending=True).head(top_n)
+            figd = px.bar(
+                dso_vend,
+                x="dso_medio",
+                y="vendedor",
+                color="regiao",
+                orientation="h",
+                template=chart_template,
+                color_discrete_sequence=["#2563eb", "#10b981", "#f97316", "#6366f1"],
+            )
+            figd.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font, legend_title_text="")
+            figd.update_xaxes(title="Dias (média ponderada)")
+            st.plotly_chart(figd, width="stretch")
+
+
 def main():
     st.set_page_config(
-        page_title="Dashboard Operacional - Vendas",
+        page_title="Dashboards de Vendas",
         page_icon="📊",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.title("Dashboard Operacional de Vendas")
-    st.caption("Visão geral do volume de vendas, faturamento e indicadores operacionais.")
-
     inject_typography()
 
-    df = gerar_dados_mock()
+    df_vendas, df, df_metas = gerar_dados_mock()
     color_sequence = ["#2563eb", "#10b981", "#f97316", "#6366f1"]
     chart_template = "plotly_white"
     plotly_font = dict(family="Nunito", color="#0f172a", size=12)
 
     # Menu lateral (sidebar)
+    st.sidebar.subheader("Dashboard")
+    dashboard = st.sidebar.radio(
+        "Selecione",
+        options=["Análise Operacional", "Performance Comercial"],
+        label_visibility="collapsed",
+    )
+
     st.sidebar.subheader("Filtros")
     with st.sidebar.container(border=True):
         periodo_visualizacao = st.selectbox(
@@ -402,12 +989,34 @@ def main():
         inicio, fim = intervalo
         mask = (df["data"].dt.date >= inicio) & (df["data"].dt.date <= fim)
         df_periodo = df.loc[mask].copy()
+        mask_v = (df_vendas["data"].dt.date >= inicio) & (df_vendas["data"].dt.date <= fim)
+        df_vendas_periodo = df_vendas.loc[mask_v].copy()
     else:
         df_periodo = df.copy()
+        df_vendas_periodo = df_vendas.copy()
+        inicio = df_periodo["data"].min().date()
+        fim = df_periodo["data"].max().date()
 
     if df_periodo.empty:
         st.warning("Nenhum dado para o período selecionado.")
         return
+
+    if dashboard == "Performance Comercial":
+        st.title("Dashboard de Performance Comercial")
+        st.caption("Receita, metas, margem, clientes e eficiência de recebimento.")
+        render_performance_comercial(
+            df_vendas_periodo=df_vendas_periodo,
+            df_vendas_full=df_vendas,
+            df_metas=df_metas,
+            inicio=inicio,
+            fim=fim,
+            plotly_font=plotly_font,
+            chart_template=chart_template,
+        )
+        return
+
+    st.title("Dashboard Operacional de Vendas")
+    st.caption("Visão geral do volume de vendas, faturamento e indicadores operacionais.")
 
     df_agg = calcular_periodos(df_periodo, periodo_visualizacao)
 
