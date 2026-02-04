@@ -111,6 +111,55 @@ def kpi_card(title, value, sublabel=None, delta=None, help_text=None):
         if help_text:
             st.caption(help_text)
 
+def inject_typography():
+    st.markdown(
+        textwrap.dedent(
+            """
+            <style>
+            @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap');
+
+            /* Fonte padrão para o app (exclui ícones do Streamlit) */
+            html, body, [data-testid="stAppViewContainer"] {{
+              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            }}
+            [data-testid="stAppViewContainer"] *:not(.material-icons):not([class*="material-symbols"]) {{
+              font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            }}
+
+            /* Mantém Material Icons/Symbols funcionando (evita virar texto tipo 'keyboard_double_arrow_right') */
+            .material-icons,
+            [class*="material-icons"] {{
+              font-family: 'Material Icons' !important;
+              font-feature-settings: 'liga' 1;
+              -webkit-font-feature-settings: 'liga' 1;
+            }}
+            [class*="material-symbols"] {{
+              font-family: 'Material Symbols Rounded' !important;
+              font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+              font-feature-settings: 'liga' 1;
+              -webkit-font-feature-settings: 'liga' 1;
+            }}
+
+            /* Streamlit v1.4x+ usa stIconMaterial com ligatures (texto -> ícone) */
+            [data-testid="stIconMaterial"] {{
+              font-family: 'Material Symbols Rounded' !important;
+              font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+              font-feature-settings: 'liga' 1;
+              -webkit-font-feature-settings: 'liga' 1;
+              text-transform: none;
+              letter-spacing: normal;
+              white-space: nowrap;
+              word-wrap: normal;
+              direction: ltr;
+              display: inline-block;
+              line-height: 1;
+            }}
+            </style>
+            """
+        ),
+        unsafe_allow_html=True,
+    )
+
 
 def inject_dashboard_style():
     # Importante: o Streamlit reexecuta o script a cada interação.
@@ -315,9 +364,12 @@ def main():
     st.title("Dashboard Operacional de Vendas")
     st.caption("Visão geral do volume de vendas, faturamento e indicadores operacionais.")
 
+    inject_typography()
+
     df = gerar_dados_mock()
     color_sequence = ["#2563eb", "#10b981", "#f97316", "#6366f1"]
     chart_template = "plotly_white"
+    plotly_font = dict(family="Nunito", color="#0f172a", size=12)
 
     # Menu lateral (sidebar)
     st.sidebar.subheader("Filtros")
@@ -531,6 +583,7 @@ def main():
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 margin=dict(l=10, r=10, t=40, b=10),
                 hovermode="x unified",
+                font=plotly_font,
             )
 
             fig_combo.update_yaxes(
@@ -564,6 +617,7 @@ def main():
                 height=340,
                 showlegend=False,
                 margin=dict(l=10, r=10, t=30, b=10),
+                font=plotly_font,
             )
             fig_area.update_yaxes(tickprefix="R$ ", separatethousands=True)
             st.plotly_chart(fig_area, width="stretch")
@@ -592,6 +646,7 @@ def main():
                 height=340,
                 legend_title_text="",
                 margin=dict(l=10, r=10, t=30, b=10),
+                font=plotly_font,
             )
             fig_growth.update_yaxes(ticksuffix="%", zeroline=True, zerolinecolor="#94a3b8")
             st.plotly_chart(fig_growth, width="stretch")
@@ -648,6 +703,7 @@ def main():
                     legend_title_text="",
                     margin=dict(l=10, r=10, t=30, b=10),
                     hovermode="x unified",
+                    font=plotly_font,
                 )
                 fig_comp.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
                 st.plotly_chart(fig_comp, width="stretch")
@@ -669,6 +725,7 @@ def main():
                 showlegend=False,
                 margin=dict(l=10, r=10, t=30, b=10),
                 hovermode="x unified",
+                font=plotly_font,
             )
             fig_ticket.update_yaxes(
                 tickprefix="R$ ",
@@ -693,6 +750,7 @@ def main():
                 height=340,
                 showlegend=False,
                 margin=dict(l=10, r=10, t=30, b=10),
+                font=plotly_font,
             )
             fig_devol.update_yaxes(ticksuffix="%", rangemode="tozero")
             st.plotly_chart(fig_devol, width="stretch")
