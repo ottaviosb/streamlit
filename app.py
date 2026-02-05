@@ -49,6 +49,30 @@ def gerar_dados_mock(ano: int | None = None):
         "Equipe D": "Centro-Oeste",
     }
 
+    # Catálogo de produtos (para Análise por item)
+    rng_cat = np.random.default_rng(2026)
+    marcas = [
+        "Aurora", "Bravus", "Cobalto", "Dália", "Eclipse", "Fênix",
+        "Gaia", "Hélios", "Íris", "Jade", "Kairo", "Lumen",
+    ]
+    subgrupos = [
+        "Bebidas", "Snacks", "Mercearia", "Limpeza", "Higiene",
+        "Congelados", "Laticínios", "Padaria", "Pet", "Utilidades",
+    ]
+    n_itens = 240
+    # popularidade estilo "cauda longa"
+    pop = 1 / (np.arange(1, n_itens + 1) ** 1.15)
+    pop = pop / pop.sum()
+    catalogo = pd.DataFrame(
+        {
+            "item_id": np.arange(1, n_itens + 1),
+            "item": [f"Item {i:03d}" for i in range(1, n_itens + 1)],
+            "marca": rng_cat.choice(marcas, size=n_itens, replace=True),
+            "subgrupo": rng_cat.choice(subgrupos, size=n_itens, replace=True),
+            "popularidade": pop,
+        }
+    )
+
     def gerar_transacoes_ano(ano_ref: int, seed: int) -> pd.DataFrame:
         datas = pd.date_range(start=f"{ano_ref}-01-01", end=f"{ano_ref}-12-31", freq="D")
         rng = np.random.default_rng(seed)
@@ -84,9 +108,21 @@ def gerar_dados_mock(ano: int | None = None):
         equipe = np.array([equipes[v] for v in vendedor])
         regiao = np.array([regioes[e] for e in equipe])
 
+        # Produto por transação (simplificação: 1 item principal por transação)
+        item_id = rng.choice(
+            catalogo["item_id"].to_numpy(),
+            size=len(datas_rep),
+            replace=True,
+            p=catalogo["popularidade"].to_numpy(),
+        )
+        prod = catalogo.set_index("item_id").loc[item_id].reset_index()
+
         # cliente por transação
         n_clientes = 2400
         cliente_id = rng.integers(1, n_clientes + 1, size=len(datas_rep))
+        cliente_id_s = pd.Series(cliente_id)
+        cliente_nome = mock_cliente_nome(cliente_id_s).to_numpy()
+        cliente = np.array([f"{cid:04d} - {nm}" for cid, nm in zip(cliente_id, cliente_nome)])
 
         # ticket por transação (dependente do dia)
         # gera por blocos diários (mais eficiente)
@@ -153,9 +189,15 @@ def gerar_dados_mock(ano: int | None = None):
                 "id_venda": np.arange(1, len(datas_rep) + 1),
                 "data": dt_venda,
                 "cliente_id": cliente_id,
+                "cliente_nome": cliente_nome,
+                "cliente": cliente,
                 "vendedor": vendedor,
                 "equipe": equipe,
                 "regiao": regiao,
+                "item_id": item_id,
+                "item": prod["item"].to_numpy(),
+                "marca": prod["marca"].to_numpy(),
+                "subgrupo": prod["subgrupo"].to_numpy(),
                 "qtd_itens": qtd_itens,
                 "valor_bruto": valor_bruto,
                 "desconto": desconto,
@@ -250,6 +292,67 @@ def format_currency_compact(v: float) -> str:
     return format_currency(v)
 
 
+def mock_cliente_nome(cliente_id: pd.Series) -> pd.Series:
+    """
+    Gera nomes mockados e determinísticos para clientes a partir do cliente_id.
+    """
+    primeiros = np.array(
+        [
+            "Otávio",
+            "Mariana",
+            "Beatriz",
+            "Rafael",
+            "Camila",
+            "Pedro",
+            "Larissa",
+            "Gustavo",
+            "Juliana",
+            "Bruno",
+            "Ana",
+            "Diego",
+            "Fernanda",
+            "Luiz",
+            "Paula",
+            "Thiago",
+            "Carolina",
+            "Felipe",
+            "Isabela",
+            "Rodrigo",
+        ]
+    )
+    sobrenomes = np.array(
+        [
+            "Silva",
+            "Santos",
+            "Oliveira",
+            "Souza",
+            "Lima",
+            "Pereira",
+            "Carvalho",
+            "Ferreira",
+            "Almeida",
+            "Gomes",
+            "Ribeiro",
+            "Martins",
+            "Araújo",
+            "Barbosa",
+            "Rocha",
+            "Dias",
+            "Teixeira",
+            "Melo",
+            "Moreira",
+            "Costa",
+        ]
+    )
+
+    cid = cliente_id.astype(np.int64).to_numpy()
+    i1 = (cid * 37 + 11) % len(primeiros)
+    i2 = (cid * 91 + 7) % len(sobrenomes)
+    i3 = (cid * 19 + 3) % len(sobrenomes)
+    nome = primeiros[i1] + " " + sobrenomes[i2] + " " + sobrenomes[i3]
+    return pd.Series(nome, index=cliente_id.index)
+
+
 def format_percent(v):
     return f"{v:+.1f}%"
 
@@ -266,7 +369,6 @@ def kpi_card(title, value, sublabel=None, delta=None, help_text=None):
             st.caption(help_text)
 
 def inject_typography():
-    # Carrega Nunito via Google Fonts (mais confiável que @import em alguns ambientes)
     st.markdown(
         textwrap.dedent(
             """
@@ -538,6 +640,331 @@ def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
     denom = w.sum()
     return float((v * w).sum() / denom) if denom > 0 else 0.0
 
+
+def abc_classificacao(
+    df: pd.DataFrame,
+    group_col: str,
+    value_col: str,
+    a_cut: float = 0.80,
+    b_cut: float = 0.95,
+) -> pd.DataFrame:
+    base = (
+        df.groupby(group_col, as_index=False)
+        .agg(valor=(value_col, "sum"))
+        .sort_values("valor", ascending=False)
+    )
+    total = float(base["valor"].sum())
+    base["participacao"] = base["valor"] / total if total > 0 else 0.0
+    base["participacao_acum"] = base["participacao"].cumsum()
+    base["classe_abc"] = np.select(
+        [base["participacao_acum"] <= a_cut, base["participacao_acum"] <= b_cut],
+        ["A", "B"],
+        default="C",
+    )
+    return base
+
+
+def render_abc_resumo(df_abc: pd.DataFrame):
+    """
+    Mostra um resumo rápido da distribuição ABC (quantidade e contribuição no total).
+    df_abc deve conter: valor, participacao, classe_abc
+    """
+    if df_abc.empty:
+        return
+    resumo = (
+        df_abc.groupby("classe_abc", as_index=False)
+        .agg(qtd=("classe_abc", "size"), valor=("valor", "sum"), part=("participacao", "sum"))
+        .sort_values("classe_abc")
+    )
+    mapa = {row["classe_abc"]: row for _, row in resumo.iterrows()}
+
+    def _get(classe, key, default=0.0):
+        return float(mapa.get(classe, {}).get(key, default))
+
+    a_qtd, b_qtd, c_qtd = int(_get("A", "qtd", 0)), int(_get("B", "qtd", 0)), int(_get("C", "qtd", 0))
+    a_part, b_part, c_part = _get("A", "part", 0.0) * 100, _get("B", "part", 0.0) * 100, _get("C", "part", 0.0) * 100
+
+    col1, col2, col3 = st.columns(3, gap="large")
+    with col1:
+        st.metric("Classe A", f"{a_qtd:,}".replace(",", "."), f"{a_part:.1f}% do total")
+    with col2:
+        st.metric("Classe B", f"{b_qtd:,}".replace(",", "."), f"{b_part:.1f}% do total")
+    with col3:
+        st.metric("Classe C", f"{c_qtd:,}".replace(",", "."), f"{c_part:.1f}% do total")
+
+
+def _wallet_share_from_cliente_id(cliente_id: pd.Series) -> pd.Series:
+    """
+    Mock determinístico de participação na carteira (share) por cliente.
+    Retorna valores entre ~5% e ~60%.
+    """
+    cid = cliente_id.astype(np.int64)
+    seed = (cid * 1103515245 + 12345) % 2147483647
+    frac = (seed % 10_000) / 10_000.0
+    return (0.05 + frac * 0.55).clip(0.05, 0.60)
+
+
+def render_analise_clientes(
+    df_vendas_periodo: pd.DataFrame,
+    df_vendas_full: pd.DataFrame,
+    plotly_font: dict,
+    chart_template: str,
+):
+    st.title("Análise por Clientes")
+    st.caption("Identificação, valorização e segmentação (ABC) de clientes e regiões.")
+
+    st.sidebar.subheader("Filtros (Clientes)")
+    with st.sidebar.container(border=True):
+        top_n = st.slider("Top N", 5, 50, 15, 5)
+        metrica_abc = st.selectbox(
+            "Métrica para Curva ABC",
+            ["Faturamento Líquido", "Margem Bruta"],
+            index=0,
+        )
+
+        # Filtros comerciais opcionais
+        filtro_regiao = st.multiselect(
+            "Região (vendas)",
+            options=sorted(df_vendas_periodo["regiao"].unique().tolist()),
+            default=sorted(df_vendas_periodo["regiao"].unique().tolist()),
+        )
+        filtro_equipe = st.multiselect(
+            "Equipe",
+            options=sorted(df_vendas_periodo["equipe"].unique().tolist()),
+            default=sorted(df_vendas_periodo["equipe"].unique().tolist()),
+        )
+        filtro_vendedor = st.multiselect(
+            "Vendedor",
+            options=sorted(df_vendas_periodo["vendedor"].unique().tolist()),
+            default=sorted(df_vendas_periodo["vendedor"].unique().tolist()),
+        )
+
+    dfc = df_vendas_periodo[
+        df_vendas_periodo["regiao"].isin(filtro_regiao)
+        & df_vendas_periodo["equipe"].isin(filtro_equipe)
+        & df_vendas_periodo["vendedor"].isin(filtro_vendedor)
+    ].copy()
+
+    if dfc.empty:
+        st.warning("Sem dados para os filtros selecionados.")
+        return
+
+    value_col = "valor_liquido" if metrica_abc == "Faturamento Líquido" else "lucro_bruto"
+
+    tab1, tab2, tab3 = st.tabs(["Clientes", "Regiões", "Carteira & LTV"])
+
+    with tab1:
+        st.subheader("Rankings de Clientes", divider="gray")
+        col1, col2, col3 = st.columns(3, gap="large")
+
+        with col1:
+            df_rank_fat = (
+                dfc.groupby("cliente", as_index=False)
+                .agg(faturamento=("valor_liquido", "sum"))
+                .sort_values("faturamento", ascending=False)
+                .head(top_n)
+            )
+            fig = px.bar(
+                df_rank_fat,
+                x="cliente",
+                y="faturamento",
+                template=chart_template,
+                color_discrete_sequence=["#2563eb"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col2:
+            df_rank_m = (
+                dfc.groupby("cliente", as_index=False)
+                .agg(margem=("lucro_bruto", "sum"))
+                .sort_values("margem", ascending=False)
+                .head(top_n)
+            )
+            fig = px.bar(
+                df_rank_m,
+                x="cliente",
+                y="margem",
+                template=chart_template,
+                color_discrete_sequence=["#10b981"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col3:
+            df_rank_vol = (
+                dfc.groupby("cliente", as_index=False)
+                .agg(volume=("qtd_itens", "sum"))
+                .sort_values("volume", ascending=False)
+                .head(top_n)
+            )
+            fig = px.bar(
+                df_rank_vol,
+                x="cliente",
+                y="volume",
+                template=chart_template,
+                color_discrete_sequence=["#6366f1"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        st.subheader("Clientes ABC (Curva ABC)", divider="gray")
+        df_abc_c = abc_classificacao(dfc, "cliente", value_col=value_col)
+        render_abc_resumo(df_abc_c)
+        st.caption(
+            "ABC = classificação por contribuição acumulada no total: A (~80%), B (~15%), C (~5%). "
+            "O gráfico abaixo mostra apenas o Top N; as classes são calculadas no total."
+        )
+        fig_abc = px.bar(
+            df_abc_c.head(top_n),
+            x="cliente",
+            y="valor",
+            color="classe_abc",
+            template=chart_template,
+            color_discrete_map={"A": "#16a34a", "B": "#f97316", "C": "#dc2626"},
+        )
+        fig_abc.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font, legend_title_text="ABC")
+        fig_abc.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_abc, width="stretch")
+
+    with tab2:
+        st.subheader("Rankings de Regiões", divider="gray")
+        col1, col2, col3 = st.columns(3, gap="large")
+
+        with col1:
+            df_r_fat = (
+                dfc.groupby("regiao", as_index=False)
+                .agg(faturamento=("valor_liquido", "sum"))
+                .sort_values("faturamento", ascending=False)
+            )
+            fig = px.bar(
+                df_r_fat,
+                x="regiao",
+                y="faturamento",
+                template=chart_template,
+                color_discrete_sequence=["#2563eb"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col2:
+            df_r_m = (
+                dfc.groupby("regiao", as_index=False)
+                .agg(margem=("lucro_bruto", "sum"))
+                .sort_values("margem", ascending=False)
+            )
+            fig = px.bar(
+                df_r_m,
+                x="regiao",
+                y="margem",
+                template=chart_template,
+                color_discrete_sequence=["#10b981"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col3:
+            df_r_v = (
+                dfc.groupby("regiao", as_index=False)
+                .agg(volume=("qtd_itens", "sum"))
+                .sort_values("volume", ascending=False)
+            )
+            fig = px.bar(
+                df_r_v,
+                x="regiao",
+                y="volume",
+                template=chart_template,
+                color_discrete_sequence=["#6366f1"],
+            )
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        st.subheader("Regiões ABC (Curva ABC)", divider="gray")
+        df_abc_r = abc_classificacao(dfc, "regiao", value_col=value_col)
+        render_abc_resumo(df_abc_r)
+        st.caption(
+            "ABC = A (~80% do valor acumulado), B (até ~95%), C (restante). "
+            "Como há poucas regiões, aqui normalmente aparecem A/B/C."
+        )
+        fig_abc = px.bar(
+            df_abc_r,
+            x="regiao",
+            y="valor",
+            color="classe_abc",
+            template=chart_template,
+            color_discrete_map={"A": "#16a34a", "B": "#f97316", "C": "#dc2626"},
+        )
+        fig_abc.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font, legend_title_text="ABC")
+        fig_abc.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_abc, width="stretch")
+
+    with tab3:
+        st.subheader("Participação na Carteira", divider="gray")
+        # Participação na carteira: mock por cliente (share determinístico)
+        spend = dfc.groupby(["cliente_id", "cliente"], as_index=False).agg(
+            spend_empresa=("valor_liquido", "sum")
+        )
+        spend["share"] = _wallet_share_from_cliente_id(spend["cliente_id"])
+        spend["gasto_total_categoria"] = spend["spend_empresa"] / spend["share"]
+        spend["participacao_pct"] = spend["share"] * 100
+        spend_top = spend.sort_values("spend_empresa", ascending=False).head(top_n)
+
+        col1, col2 = st.columns(2, gap="large")
+        with col1:
+            fig = px.bar(
+                spend_top,
+                x="cliente",
+                y="participacao_pct",
+                template=chart_template,
+                color_discrete_sequence=["#f97316"],
+            )
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(ticksuffix="%", rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
+
+        with col2:
+            st.markdown("**LTV (estimado)**")
+            # Estima LTV com base em histórico + recência/frequência (heurística simples)
+            full_c = df_vendas_full[
+                df_vendas_full["cliente_id"].isin(spend_top["cliente_id"])
+            ].copy()
+            agg = (
+                full_c.groupby("cliente_id", as_index=False)
+                .agg(
+                    receita_total=("valor_liquido", "sum"),
+                    n_tx=("id_venda", "count"),
+                    dt_min=("data", "min"),
+                    dt_max=("data", "max"),
+                )
+            )
+            # adiciona label do cliente
+            label_map = spend_top.drop_duplicates("cliente_id").set_index("cliente_id")["cliente"]
+            agg["cliente"] = agg["cliente_id"].map(label_map)
+            # janela ativa em meses
+            meses_ativos = ((agg["dt_max"] - agg["dt_min"]).dt.days / 30.0).clip(lower=1.0)
+            recencia = (dfc["data"].max() - agg["dt_max"]).dt.days.clip(lower=0)
+            freq_mes = agg["n_tx"] / meses_ativos
+            receita_mensal = agg["receita_total"] / meses_ativos
+            meses_futuros = (6 + freq_mes * 6 - recencia / 30.0 * 1.5).clip(3, 36)
+            agg["ltv_estimado"] = (receita_mensal * (meses_ativos + meses_futuros)).round(2)
+
+            agg_top = agg.sort_values("ltv_estimado", ascending=False).head(top_n)
+            fig = px.bar(
+                agg_top,
+                x="cliente",
+                y="ltv_estimado",
+                template=chart_template,
+                color_discrete_sequence=["#10b981"],
+            )
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+            fig.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+            st.plotly_chart(fig, width="stretch")
 
 def render_performance_comercial(
     df_vendas_periodo: pd.DataFrame,
@@ -936,6 +1363,256 @@ def render_performance_comercial(
             st.plotly_chart(figd, width="stretch")
 
 
+def render_analise_itens(
+    df_vendas_periodo: pd.DataFrame,
+    plotly_font: dict,
+    chart_template: str,
+):
+    st.title("Análise por Itens")
+    st.caption("Performance de subgrupos, marcas e itens com Curva ABC e filtros por Vendedor/Equipe/Região.")
+
+    # Filtros por dimensão comercial
+    st.sidebar.subheader("Filtros (Itens)")
+    with st.sidebar.container(border=True):
+        filtro_regiao = st.multiselect(
+            "Região",
+            options=sorted(df_vendas_periodo["regiao"].unique().tolist()),
+            default=sorted(df_vendas_periodo["regiao"].unique().tolist()),
+        )
+        filtro_equipe = st.multiselect(
+            "Equipe",
+            options=sorted(df_vendas_periodo["equipe"].unique().tolist()),
+            default=sorted(df_vendas_periodo["equipe"].unique().tolist()),
+        )
+        filtro_vendedor = st.multiselect(
+            "Vendedor",
+            options=sorted(df_vendas_periodo["vendedor"].unique().tolist()),
+            default=sorted(df_vendas_periodo["vendedor"].unique().tolist()),
+        )
+
+        metrica_abc = st.selectbox(
+            "Métrica para Curva ABC",
+            ["Faturamento Líquido", "Margem Bruta"],
+            index=0,
+        )
+        top_itens = st.slider("Top itens/marcas/subgrupos", 10, 50, 20, 5)
+
+    df_item = df_vendas_periodo[
+        df_vendas_periodo["regiao"].isin(filtro_regiao)
+        & df_vendas_periodo["equipe"].isin(filtro_equipe)
+        & df_vendas_periodo["vendedor"].isin(filtro_vendedor)
+    ].copy()
+
+    if df_item.empty:
+        st.warning("Sem dados para os filtros selecionados.")
+        return
+
+    value_col = "valor_liquido" if metrica_abc == "Faturamento Líquido" else "lucro_bruto"
+
+    st.subheader("Subgrupos", divider="gray")
+    col_s1, col_s2, col_s3 = st.columns(3, gap="large")
+    with col_s1:
+        df_sub_fat = (
+            df_item.groupby("subgrupo", as_index=False)
+            .agg(faturamento_liquido=("valor_liquido", "sum"))
+            .sort_values("faturamento_liquido", ascending=False)
+            .head(top_itens)
+        )
+        fig_sf = px.bar(
+            df_sub_fat,
+            x="subgrupo",
+            y="faturamento_liquido",
+            template=chart_template,
+            color_discrete_sequence=["#2563eb"],
+        )
+        fig_sf.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+        fig_sf.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_sf, width="stretch")
+
+    with col_s2:
+        df_sub_m = (
+            df_item.groupby("subgrupo", as_index=False)
+            .agg(
+                margem_bruta=("lucro_bruto", "sum"),
+                faturamento_liquido=("valor_liquido", "sum"),
+            )
+            .sort_values("margem_bruta", ascending=False)
+            .head(top_itens)
+        )
+        fig_sm = px.bar(
+            df_sub_m,
+            x="subgrupo",
+            y="margem_bruta",
+            template=chart_template,
+            color_discrete_sequence=["#10b981"],
+        )
+        fig_sm.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+        fig_sm.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_sm, width="stretch")
+
+    with col_s3:
+        df_abc_s = abc_classificacao(df_item, "subgrupo", value_col=value_col)
+        fig_abc_s = px.bar(
+            df_abc_s.head(top_itens),
+            x="subgrupo",
+            y="valor",
+            color="classe_abc",
+            template=chart_template,
+            color_discrete_map={"A": "#16a34a", "B": "#f97316", "C": "#dc2626"},
+        )
+        fig_abc_s.update_layout(
+            height=330,
+            margin=dict(l=10, r=10, t=30, b=10),
+            font=plotly_font,
+            legend_title_text="ABC",
+        )
+        fig_abc_s.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_abc_s, width="stretch")
+
+    st.subheader("Marcas", divider="gray")
+    col_m1, col_m2, col_m3 = st.columns(3, gap="large")
+    with col_m1:
+        df_marca_f = (
+            df_item.groupby("marca", as_index=False)
+            .agg(faturamento_liquido=("valor_liquido", "sum"))
+            .sort_values("faturamento_liquido", ascending=False)
+            .head(top_itens)
+        )
+        fig_mf = px.bar(
+            df_marca_f,
+            x="marca",
+            y="faturamento_liquido",
+            template=chart_template,
+            color_discrete_sequence=["#2563eb"],
+        )
+        fig_mf.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+        fig_mf.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_mf, width="stretch")
+
+    with col_m2:
+        df_marca_m = (
+            df_item.groupby("marca", as_index=False)
+            .agg(margem_bruta=("lucro_bruto", "sum"))
+            .sort_values("margem_bruta", ascending=False)
+            .head(top_itens)
+        )
+        fig_mm = px.bar(
+            df_marca_m,
+            x="marca",
+            y="margem_bruta",
+            template=chart_template,
+            color_discrete_sequence=["#10b981"],
+        )
+        fig_mm.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+        fig_mm.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_mm, width="stretch")
+
+    with col_m3:
+        df_abc_m = abc_classificacao(df_item, "marca", value_col=value_col)
+        fig_abc_m = px.bar(
+            df_abc_m.head(top_itens),
+            x="marca",
+            y="valor",
+            color="classe_abc",
+            template=chart_template,
+            color_discrete_map={"A": "#16a34a", "B": "#f97316", "C": "#dc2626"},
+        )
+        fig_abc_m.update_layout(
+            height=330,
+            margin=dict(l=10, r=10, t=30, b=10),
+            font=plotly_font,
+            legend_title_text="ABC",
+        )
+        fig_abc_m.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero")
+        st.plotly_chart(fig_abc_m, width="stretch")
+
+    st.subheader("Itens", divider="gray")
+    col_i1, col_i2 = st.columns((1.4, 1), gap="large")
+    with col_i1:
+        ordem = st.selectbox(
+            "Ordenar itens por",
+            ["Faturamento Líquido", "Margem Bruta", "Volume (itens)"],
+            index=0,
+        )
+        if ordem == "Faturamento Líquido":
+            agg_item = (
+                df_item.groupby(["item"], as_index=False)
+                .agg(valor=("valor_liquido", "sum"))
+                .sort_values("valor", ascending=False)
+                .head(top_itens)
+            )
+            tick = "R$ "
+        elif ordem == "Margem Bruta":
+            agg_item = (
+                df_item.groupby(["item"], as_index=False)
+                .agg(valor=("lucro_bruto", "sum"))
+                .sort_values("valor", ascending=False)
+                .head(top_itens)
+            )
+            tick = "R$ "
+        else:
+            agg_item = (
+                df_item.groupby(["item"], as_index=False)
+                .agg(valor=("qtd_itens", "sum"))
+                .sort_values("valor", ascending=False)
+                .head(top_itens)
+            )
+            tick = ""
+
+        fig_it = px.bar(
+            agg_item,
+            x="item",
+            y="valor",
+            template=chart_template,
+            color_discrete_sequence=["#6366f1"],
+        )
+        fig_it.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10), font=plotly_font)
+        if tick:
+            fig_it.update_yaxes(tickprefix=tick, separatethousands=True, rangemode="tozero")
+        else:
+            fig_it.update_yaxes(rangemode="tozero")
+        st.plotly_chart(fig_it, width="stretch")
+
+    with col_i2:
+        st.markdown("**Curva ABC (Itens) — Pareto**")
+        df_abc_i = abc_classificacao(df_item, "item", value_col=value_col)
+        pareto = df_abc_i.head(top_itens).copy()
+        pareto["participacao_acum_pct"] = pareto["participacao_acum"] * 100
+        fig_p = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_p.add_trace(
+            go.Bar(
+                x=pareto["item"],
+                y=pareto["valor"],
+                name=metrica_abc,
+                marker_color="#2563eb",
+                opacity=0.9,
+            ),
+            secondary_y=False,
+        )
+        fig_p.add_trace(
+            go.Scatter(
+                x=pareto["item"],
+                y=pareto["participacao_acum_pct"],
+                name="% acumulado",
+                mode="lines+markers",
+                line=dict(color="#f97316", width=3),
+                marker=dict(size=6),
+            ),
+            secondary_y=True,
+        )
+        fig_p.update_layout(
+            template=chart_template,
+            height=380,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="x unified",
+            font=plotly_font,
+        )
+        fig_p.update_yaxes(tickprefix="R$ ", separatethousands=True, rangemode="tozero", secondary_y=False)
+        fig_p.update_yaxes(ticksuffix="%", rangemode="tozero", secondary_y=True, showgrid=False)
+        st.plotly_chart(fig_p, width="stretch")
+
+
 def main():
     st.set_page_config(
         page_title="Dashboards de Vendas",
@@ -955,7 +1632,12 @@ def main():
     st.sidebar.subheader("Dashboard")
     dashboard = st.sidebar.radio(
         "Selecione",
-        options=["Análise Operacional", "Performance Comercial"],
+        options=[
+            "Análise Operacional",
+            "Performance Comercial",
+            "Análise por Itens",
+            "Análise por Clientes",
+        ],
         label_visibility="collapsed",
     )
 
@@ -1010,6 +1692,23 @@ def main():
             df_metas=df_metas,
             inicio=inicio,
             fim=fim,
+            plotly_font=plotly_font,
+            chart_template=chart_template,
+        )
+        return
+
+    if dashboard == "Análise por Itens":
+        render_analise_itens(
+            df_vendas_periodo=df_vendas_periodo,
+            plotly_font=plotly_font,
+            chart_template=chart_template,
+        )
+        return
+
+    if dashboard == "Análise por Clientes":
+        render_analise_clientes(
+            df_vendas_periodo=df_vendas_periodo,
+            df_vendas_full=df_vendas,
             plotly_font=plotly_font,
             chart_template=chart_template,
         )
